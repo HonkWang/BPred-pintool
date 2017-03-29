@@ -24,44 +24,81 @@ uint k = 0;
 uint total_branches = 0;
 uint total_taken = 0;
 uint total_fallthru = 0;
-
+uint total_mispredicts = 0;
 uint *preds;
 uint nlimit = 0;
-uint GHR = 0;
+uint threshold = 0;
+unsigned short GHR = 0;
+unsigned short GHR_mask = 0;
+unsigned short addr_mask = 0;
 
+void updateGHR(bool taken) {
+    GHR = GHR << 1;
+    if (taken)
+        GHR++;
+}
+
+bool predict_taken(unsigned short idx) {
+    uint counter = preds[idx];
+
+    if (counter > threshold) {
+        return true;
+    return false;
+}
+
+void updateCounter(unsigned short idx, bool taken) {
+    if (taken) {
+        if (preds[idx] < nlimit - 1)
+            preds[idx] = preds[idx] + 1;
+    } else {
+        if (preds[idx] > 0)
+            preds[idx] = pres[idx] - 1;
+    }
+}
 // Invoked once per dynamic branch instruction
 // pc: The address of the branch
 // taken: Non zero if a branch is taken
 VOID DoBranch(ADDRINT pc, BOOL taken) {
-  total_branches++;
-  if (taken)
-    total_taken++;
-  else
-    total_fallthru++;
-  
+    total_branches++;
+    unsigned short idx_addr = pc && addr_mask;
+    unsigned short idx = ((GHR&&GHR_mask)<<k)+idx_addr;
+    bool pred_taken = predict_taken(idx);
+
+    if (taken) {
+        total_taken++;
+        if (!pred_taken)
+            total_mispredicts++;
+    } else {
+        total_fallthru++;
+        if (pred_taken)
+            total_mispredicts++;
+    }
+    // for efficiency updateCounter() and predict_taken() can be merged
+    updateCounter(idx, taken);     
+    updateGHR(taken);
 }
 
 // Called once per runtime image load
 VOID Image(IMG img, VOID * v) {
-  // find and instrument branches
-  for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec)) {
-    for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
-      RTN_Open(rtn);
-      for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins)) {
-	if (INS_IsBranch(ins) && INS_HasFallThrough(ins)) {
-	  INS_InsertCall( ins, IPOINT_BEFORE, (AFUNPTR)DoBranch, IARG_INST_PTR, IARG_BRANCH_TAKEN, IARG_END);
-	}
-      }
-      RTN_Close(rtn);
+    // find and instrument branches
+    for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec)) {
+        for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
+            RTN_Open(rtn);
+            for (INS ins = RTN_InsHead(rtn); INS_Valid(ins); ins = INS_Next(ins)) {
+	            if (INS_IsBranch(ins) && INS_HasFallThrough(ins)) {
+	                INS_InsertCall( ins, IPOINT_BEFORE, (AFUNPTR)DoBranch, IARG_INST_PTR, IARG_BRANCH_TAKEN, IARG_END);
+	            }
+            }
+            RTN_Close(rtn);
+        }
     }
-  }
 }
 
 INT32 Usage() {
-  cerr << "This pin tool simulates an (m,n,k) branch predictor." << endl;
-  cerr << KNOB_BASE::StringKnobSummary();
-  cerr << endl;
-  return -1;
+    cerr << "This pin tool simulates an (m,n,k) branch predictor." << endl;
+    cerr << KNOB_BASE::StringKnobSummary();
+    cerr << endl;
+    return -1;
 }
 
 // Called once upon program exit
@@ -97,10 +134,20 @@ int main(int argc, CHAR *argv[]) {
     k = KnobK.Value();
     /* Space occupied by the Correlating Branch predictor */
     uint budget = 1 << (m + k);
-    // could make it smaller since n = 1 | 2 bits
+    // could make it smaller since n is definitely less than 64 bits long
     preds = calloc(budget, sizeof(uint));
+    
+    nlimit = 1 << n;
+    threshold = nlimit/2;
+    
+    GHR_mask = (1<<m)-1;
+    addr_mask = (1<<k)-1;
 
     IMG_AddInstrumentFunction(Image, 0);
+
+    total_bits = budget*n;
+    accuracy = 1 - ((float) total_mispredicts/total_branches);
+    
     PIN_AddFiniFunction(Fini, 0);
 
     PIN_StartProgram();
